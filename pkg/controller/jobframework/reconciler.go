@@ -937,13 +937,23 @@ func (r *JobReconciler) constructWorkload(ctx context.Context, job GenericJob, o
 
 	podSets := job.PodSets()
 
+	annotations := admissioncheck.FilterProvReqAnnotations(job.Object().GetAnnotations())
+
+	// Propagate non-preemptible annotation
+	if nonPreemptible, exists := job.Object().GetAnnotations()[constants.NonPreemptibleAnnotation]; exists {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[constants.NonPreemptibleAnnotation] = nonPreemptible
+	}
+
 	wl := &kueue.Workload{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        GetWorkloadNameForOwnerWithGVK(object.GetName(), object.GetUID(), job.GVK()),
 			Namespace:   object.GetNamespace(),
 			Labels:      maps.FilterKeys(job.Object().GetLabels(), r.labelKeysToCopy),
 			Finalizers:  []string{kueue.ResourceInUseFinalizerName},
-			Annotations: admissioncheck.FilterProvReqAnnotations(job.Object().GetAnnotations()),
+			Annotations: annotations,
 		},
 		Spec: kueue.WorkloadSpec{
 			PodSets:                     podSets,

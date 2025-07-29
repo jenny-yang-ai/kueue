@@ -43,4 +43,9 @@ const (
 
 	// ManagedByKueueLabel label that signalize that an object is managed by Kueue
 	ManagedByKueueLabel = "kueue.x-k8s.io/managed"
+
+	// NonPreemptibleAnnotation is the annotation key that indicates whether a workload cannot be preempted.
+	// Value should be "true" for non-preemptible workloads.
+	// If the annotation is missing, the workload is considered preemptible (backward compatibility).
+	NonPreemptibleAnnotation = "kueue.x-k8s.io/non-preemptible"
 )

@@ -654,6 +654,16 @@ func (a *FlavorAssigner) fitsResourceQuota(log logr.Logger, fr resources.FlavorR
 		return noFit, false, &status
 	}
 
+	// Check non-preemptible quota constraint
+	if workload.IsNonPreemptible(a.wl.Obj) {
+		currentNonPreemptibleUsage := a.cq.NonPreemptibleUsage(fr)
+		if currentNonPreemptibleUsage+val > rQuota.Nominal {
+			status.append(fmt.Sprintf("non-preemptible workload would exceed quota constraint for %s in flavor %s (%s > %s)",
+				fr.Resource, fr.Flavor, resources.ResourceQuantityString(fr.Resource, currentNonPreemptibleUsage+val), resources.ResourceQuantityString(fr.Resource, rQuota.Nominal)))
+			return noFit, false, &status
+		}
+	}
+
 	// Fit
 	if val <= available {
 		return fit, borrow, nil

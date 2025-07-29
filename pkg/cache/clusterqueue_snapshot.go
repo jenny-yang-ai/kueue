@@ -112,6 +112,18 @@ func (c *ClusterQueueSnapshot) PotentialAvailable(fr resources.FlavorResource) i
 	return potentialAvailable(c, fr)
 }
 
+// NonPreemptibleUsage calculates the current usage by non-preemptible workloads
+// for the given FlavorResource.
+func (c *ClusterQueueSnapshot) NonPreemptibleUsage(fr resources.FlavorResource) int64 {
+	var usage int64
+	for _, wl := range c.Workloads {
+		if workload.IsNonPreemptible(wl.Obj) {
+			usage += wl.FlavorResourceUsage()[fr]
+		}
+	}
+	return usage
+}
+
 // The methods below implement several interfaces. See
 // dominantResourceShareNode, resourceGroupNode, and netQuotaNode.
 
