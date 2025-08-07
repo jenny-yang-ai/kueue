@@ -97,6 +97,17 @@ func (c *ClusterQueueSnapshot) BorrowingWith(fr resources.FlavorResource, val in
 	return c.usageFor(fr)+val > c.QuotaFor(fr).Nominal
 }
 
+// BorrowingForPreemption checks if this cluster queue has preemptible workloads that
+// could be preempted to make room for non-preemptible workloads from other queues.
+// In the context of non-preemptible workloads, any preemptible usage is considered "borrowing"
+// since those resources could be reclaimed for non-preemptible workloads.
+func (c *ClusterQueueSnapshot) BorrowingForPreemption(fr resources.FlavorResource) bool {
+	totalUsage := c.usageFor(fr)
+	nonPreemptibleUsage := c.NonPreemptibleUsage(fr)
+	preemptibleUsage := totalUsage - nonPreemptibleUsage
+	return preemptibleUsage > 0
+}
+
 // Available returns the current capacity available, before preempting
 // any workloads. Includes local capacity and capacity borrowed from
 // Cohort. When the ClusterQueue/Cohort is in debt, Available
