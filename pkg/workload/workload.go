@@ -872,3 +872,17 @@ func References(wls []*Info) []klog.ObjectRef {
 	}
 	return keys
 }
+
+// IsNonPreemptible returns true if the workload is marked as non-preemptible.
+// If the annotation is missing, the workload is considered preemptible for backward compatibility.
+func IsNonPreemptible(w *kueue.Workload) bool {
+	if w.Annotations == nil {
+		return false
+	}
+	value, exists := w.Annotations[constants.NonPreemptibleAnnotation]
+	if !exists {
+		return false // Default: preemptible for backward compatibility
+	}
+	// Parse boolean value - "true" means non-preemptible
+	return value == "true"
+}

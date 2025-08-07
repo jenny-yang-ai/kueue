@@ -705,7 +705,7 @@ func getUsage(frq resources.FlavorResourceQuantities, cq *clusterQueue) []kueue.
 				}
 				// Enforce `borrowed=0` if the clusterQueue doesn't belong to a cohort.
 				if cq.HasParent() {
-					borrowed := used - rQuota.Nominal
+					borrowed := calculateBorrowedResources(cq, fr, used, rQuota.Nominal)
 					if borrowed > 0 {
 						rUsage.Borrowed = resources.ResourceQuantity(rName, borrowed)
 					}
@@ -720,6 +720,30 @@ func getUsage(frq resources.FlavorResourceQuantities, cq *clusterQueue) []kueue.
 		}
 	}
 	return usage
+}
+
+// calculateBorrowedResources computes the correct borrowed amount considering non-preemptible workloads.
+// Non-preemptible workloads get priority up to the nominal quota, and only preemptible usage
+// beyond the available nominal quota is considered "borrowed".
+func calculateBorrowedResources(cq *clusterQueue, fr resources.FlavorResource, totalUsed, nominal int64) int64 {
+	if totalUsed <= nominal {
+		return 0 // Not borrowing if total usage is within nominal quota
+	}
+
+	// Calculate non-preemptible usage for this FlavorResource
+	var nonPreemptibleUsage int64
+	for _, wl := range cq.Workloads {
+		if workload.IsNonPreemptible(wl.Obj) {
+			nonPreemptibleUsage += wl.FlavorResourceUsage()[fr]
+		}
+	}
+
+	// Available nominal quota for preemptible workloads
+	availableForPreemptible := max(0, nominal-nonPreemptibleUsage)
+	preemptibleUsage := totalUsed - nonPreemptibleUsage
+
+	// Only preemptible usage beyond available quota is considered borrowed
+	return max(0, preemptibleUsage-availableForPreemptible)
 }
 
 type LocalQueueUsageStats struct {

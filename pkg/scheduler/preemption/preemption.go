@@ -150,7 +150,13 @@ func (p *Preemptor) getTargets(log logr.Logger, wl workload.Info, requests resou
 	// have lower priority, and so they will not preempt the preemptor when
 	// requeued.
 	if borrowWithinCohort, thresholdPrio := canBorrowWithinCohort(cq, wl.Obj); borrowWithinCohort {
-		if !queueUnderNominalInResourcesNeedingPreemption(frsNeedPreemption, cq) {
+		var underNominal bool
+		if workload.IsNonPreemptible(wl.Obj) {
+			underNominal = queueUnderNominalInResourcesNeedingPreemptionForNonPreemptible(frsNeedPreemption, cq)
+		} else {
+			underNominal = queueUnderNominalInResourcesNeedingPreemption(frsNeedPreemption, cq)
+		}
+		if !underNominal {
 			// It can only preempt workloads from another CQ if they are strictly under allowBorrowingBelowPriority.
 			candidates = candidatesFromCQOrUnderThreshold(candidates, wl.ClusterQueue, *thresholdPrio)
 		}
@@ -159,8 +165,20 @@ func (p *Preemptor) getTargets(log logr.Logger, wl workload.Info, requests resou
 
 	// Only try preemptions in the cohort, without borrowing, if the target clusterqueue is still
 	// under nominal quota for all resources.
-	if queueUnderNominalInResourcesNeedingPreemption(frsNeedPreemption, cq) {
-		if targets := minimalPreemptions(log, requests, cq, snapshot, frsNeedPreemption, candidates, false, nil); len(targets) > 0 {
+	var underNominal bool
+	if workload.IsNonPreemptible(wl.Obj) {
+		underNominal = queueUnderNominalInResourcesNeedingPreemptionForNonPreemptible(frsNeedPreemption, cq)
+	} else {
+		underNominal = queueUnderNominalInResourcesNeedingPreemption(frsNeedPreemption, cq)
+	}
+	if underNominal {
+		var targets []*Target
+		if workload.IsNonPreemptible(wl.Obj) {
+			targets = minimalPreemptionsForNonPreemptible(log, requests, cq, snapshot, frsNeedPreemption, candidates, false, nil)
+		} else {
+			targets = minimalPreemptions(log, requests, cq, snapshot, frsNeedPreemption, candidates, false, nil)
+		}
+		if len(targets) > 0 {
 			return targets
 		}
 	}
@@ -490,6 +508,11 @@ func (p *Preemptor) findCandidates(wl *kueue.Workload, cq *cache.ClusterQueueSna
 		preemptorTS := p.workloadOrdering.GetQueueOrderTimestamp(wl)
 
 		for _, candidateWl := range cq.Workloads {
+			// Skip non-preemptible workloads
+			if workload.IsNonPreemptible(candidateWl.Obj) {
+				continue
+			}
+
 			candidatePriority := priority.Priority(candidateWl.Obj)
 			if candidatePriority > wlPriority {
 				continue
@@ -509,11 +532,16 @@ func (p *Preemptor) findCandidates(wl *kueue.Workload, cq *cache.ClusterQueueSna
 	if cq.HasParent() && cq.Preemption.ReclaimWithinCohort != kueue.PreemptionPolicyNever {
 		onlyLowerPriority := cq.Preemption.ReclaimWithinCohort != kueue.PreemptionPolicyAny
 		for _, cohortCQ := range cq.Parent().Root().SubtreeClusterQueues() {
-			if cq == cohortCQ || !cqIsBorrowing(cohortCQ, frsNeedPreemption) {
+			if cq == cohortCQ || !cqIsBorrowingForPreemptor(cohortCQ, frsNeedPreemption, wl) {
 				// Can't reclaim quota from itself or ClusterQueues that are not borrowing.
 				continue
 			}
 			for _, candidateWl := range cohortCQ.Workloads {
+				// Skip non-preemptible workloads
+				if workload.IsNonPreemptible(candidateWl.Obj) {
+					continue
+				}
+
 				if onlyLowerPriority && priority.Priority(candidateWl.Obj) >= priority.Priority(wl) {
 					continue
 				}
@@ -533,6 +561,26 @@ func cqIsBorrowing(cq *cache.ClusterQueueSnapshot, frsNeedPreemption sets.Set[re
 	}
 	for fr := range frsNeedPreemption {
 		if cq.Borrowing(fr) {
+			return true
+		}
+	}
+	return false
+}
+
+func cqIsBorrowingForPreemptor(cq *cache.ClusterQueueSnapshot, frsNeedPreemption sets.Set[resources.FlavorResource], preemptor *kueue.Workload) bool {
+	if !cq.HasParent() {
+		return false
+	}
+	for fr := range frsNeedPreemption {
+		var borrowing bool
+		if workload.IsNonPreemptible(preemptor) {
+			// For non-preemptible preemptors, any preemptible usage is considered borrowing
+			borrowing = cq.BorrowingForPreemption(fr)
+		} else {
+			// For preemptible preemptors, use standard borrowing logic
+			borrowing = cq.Borrowing(fr)
+		}
+		if borrowing {
 			return true
 		}
 	}
@@ -565,9 +613,103 @@ func workloadFits(requests resources.FlavorResourceQuantities, cq *cache.Cluster
 	return true
 }
 
+// workloadFitsForNonPreemptible checks if a non-preemptible workload fits,
+// allowing it to use nominal quota even when total usage exceeds nominal.
+func workloadFitsForNonPreemptible(requests resources.FlavorResourceQuantities, cq *cache.ClusterQueueSnapshot, allowBorrowing bool) bool {
+	for fr, v := range requests {
+		// For non-preemptible workloads, check against non-preemptible quota limit
+		if !allowBorrowing {
+			currentNonPreemptibleUsage := cq.NonPreemptibleUsage(fr)
+			nominal := cq.QuotaFor(fr).Nominal
+			if currentNonPreemptibleUsage+v > nominal {
+				return false // Would exceed non-preemptible quota
+			}
+		} else {
+			// When borrowing is allowed, use standard logic
+			if cq.BorrowingWith(fr, v) {
+				// Would be borrowing, but that's allowed
+			}
+		}
+		if v > cq.Available(fr) {
+			return false
+		}
+	}
+	return true
+}
+
+// minimalPreemptionsForNonPreemptible is like minimalPreemptions but uses
+// workloadFitsForNonPreemptible to handle non-preemptible workload quota logic correctly.
+func minimalPreemptionsForNonPreemptible(log logr.Logger, requests resources.FlavorResourceQuantities, cq *cache.ClusterQueueSnapshot, snapshot *cache.Snapshot, frsNeedPreemption sets.Set[resources.FlavorResource], candidates []*workload.Info, allowBorrowing bool, allowBorrowingBelowPriority *int32) []*Target {
+	if logV := log.V(5); logV.Enabled() {
+		logV.Info("Simulating preemption for non-preemptible workload", "candidates", workload.References(candidates), "resourcesRequiringPreemption", frsNeedPreemption, "allowBorrowing", allowBorrowing, "allowBorrowingBelowPriority", allowBorrowingBelowPriority)
+	}
+	// Simulate removing all candidates from the ClusterQueue and cohort.
+	var targets []*Target
+	fits := false
+	for _, candWl := range candidates {
+		candCQ := snapshot.ClusterQueues[candWl.ClusterQueue]
+		reason := kueue.InClusterQueueReason
+		if cq != candCQ {
+			if !cqIsBorrowingForPreemptor(candCQ, frsNeedPreemption, &kueue.Workload{}) {
+				continue
+			}
+			reason = kueue.InCohortReclamationReason
+			if allowBorrowingBelowPriority != nil {
+				if priority.Priority(candWl.Obj) >= *allowBorrowingBelowPriority {
+					allowBorrowing = false
+				} else {
+					reason = kueue.InCohortReclaimWhileBorrowingReason
+				}
+			}
+		}
+		snapshot.RemoveWorkload(candWl)
+		targets = append(targets, &Target{
+			WorkloadInfo: candWl,
+			Reason:       reason,
+		})
+		if workloadFitsForNonPreemptible(requests, cq, allowBorrowing) {
+			fits = true
+			break
+		}
+	}
+	if !fits {
+		restoreSnapshot(snapshot, targets)
+		return nil
+	}
+	targets = fillBackWorkloadsForNonPreemptible(targets, requests, cq, snapshot, allowBorrowing)
+	restoreSnapshot(snapshot, targets)
+	return targets
+}
+
+func fillBackWorkloadsForNonPreemptible(targets []*Target, requests resources.FlavorResourceQuantities, cq *cache.ClusterQueueSnapshot, snapshot *cache.Snapshot, allowBorrowing bool) []*Target {
+	// In the reverse order, check if any of the workloads can be added back.
+	for i := len(targets) - 2; i >= 0; i-- {
+		snapshot.AddWorkload(targets[i].WorkloadInfo)
+		if workloadFitsForNonPreemptible(requests, cq, allowBorrowing) {
+			// O(1) deletion: copy the last element into index i and reduce size.
+			targets[i] = targets[len(targets)-1]
+			targets = targets[:len(targets)-1]
+		} else {
+			snapshot.RemoveWorkload(targets[i].WorkloadInfo)
+		}
+	}
+	return targets
+}
+
 func queueUnderNominalInResourcesNeedingPreemption(frsNeedPreemption sets.Set[resources.FlavorResource], cq *cache.ClusterQueueSnapshot) bool {
 	for fr := range frsNeedPreemption {
 		if cq.ResourceNode.Usage[fr] >= cq.QuotaFor(fr).Nominal {
+			return false
+		}
+	}
+	return true
+}
+
+// queueUnderNominalInResourcesNeedingPreemptionForNonPreemptible checks if the queue is under nominal
+// considering only non-preemptible usage when the preemptor is non-preemptible.
+func queueUnderNominalInResourcesNeedingPreemptionForNonPreemptible(frsNeedPreemption sets.Set[resources.FlavorResource], cq *cache.ClusterQueueSnapshot) bool {
+	for fr := range frsNeedPreemption {
+		if cq.NonPreemptibleUsage(fr) >= cq.QuotaFor(fr).Nominal {
 			return false
 		}
 	}
